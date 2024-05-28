@@ -1,4 +1,35 @@
 <#
+.SYNOPSIS
+    Simple script to perform Windows Update patching
+
+.DESCRIPTION
+    Author: Jesse Reichman
+    Link: https://github.com/archmachina/pwsh-scripts/blob/main/src/patch_system.ps1
+
+    This script will attempt to perform updates for a Windows machine using
+    Windows Update, along with configurable parameters provided from a JSON
+    configuration file.
+
+    The script can be configured to install only patches older than a particular age
+    threshold and reboot the machine, if a reboot is required.
+
+.EXAMPLE
+    Example configuration file:
+
+    {
+        "UpdateCab": true,
+        "UseOfflineScan": true,
+        "LogFile": "C:\\_patching\\patching_log.txt",
+        "AgeThreshold": 14,
+        "CanReboot": true
+    }
+
+    Example call to the patch script:
+
+    .\patch_system.ps1 -ConfigFile patch_config.json -DryRun
+
+    This will perform a DryRun (No download, install or reboot) against the configuration.
+
 #>
 [CmdletBinding()]
 param(
@@ -190,7 +221,15 @@ Function Invoke-PatchingRun
 
         [Parameter(Mandatory=$false)]
         [ValidateNotNullOrEmpty()]
-        [int]$AgeThreshold = 14
+        [int]$AgeThreshold = 14,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [bool]$CanReboot = $false,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateNotNull()]
+        [int]$RebootDelaySec = 300
     )
 
     process
@@ -268,7 +307,7 @@ Function Invoke-PatchingRun
         $count = ($result.Updates | Measure-Object).Count
         "Found $count updates not installed"
         $result.Updates |
-            Format-Table -Property Title, Description, RebootRequired, MsrcSeverity, LastDeploymentChangeTime |
+            Format-List -Property Title, Description, RebootRequired, MsrcSeverity, LastDeploymentChangeTime |
             Out-String
 
         $updates = New-Object -ComObject Microsoft.Update.UpdateColl
@@ -281,14 +320,14 @@ Function Invoke-PatchingRun
         $count = ($updates | Measure-Object).Count
         "Found $count updates meeting age threshold ($AgeThreshold days)"
         $updates |
-            Format-Table -Property Title, Description, RebootRequired, MsrcSeverity, LastDeploymentChangeTime |
+            Format-List -Property Title, Description, RebootRequired, MsrcSeverity, LastDeploymentChangeTime |
             Out-String
 
         # Stop here if we're just reporting
         if ($DryRun)
         {
             "DryRun - No download or install"
-        } else {
+        } elseif (($updates | Measure-Object).Count -gt 0) {
             # Download any packages
             "Starting download of updates"
             $downloader = New-Object -ComObject Microsoft.Update.Downloader
@@ -303,11 +342,24 @@ Function Invoke-PatchingRun
             $installer.Install()
 
             "Update installation completed"
+        } else {
+            "No updates to install"
         }
 
         # Remove any instances of the package service with this name
         "Removing the registered scan service"
         Remove-UpdatePackageService -Manager $manager -Name $OfflineServiceName
+
+        # Check if a reboot is required
+        $systemInfo = New-Object -ComObject Microsoft.Update.SystemInfo
+        $rebootRequired = $systemInfo.RebootRequired
+        "Reboot required: $rebootRequired"
+        "CanReboot: $CanReboot"
+        if ($CanReboot -and $rebootRequired -and -not $DryRun)
+        {
+            "Scheduling reboot in $RebootDelaySec seconds"
+            shutdown -r -f -t "$RebootDelaySec"
+        }
     }
 }
 
